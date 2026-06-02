@@ -1,0 +1,49 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Local portable databases & thumbnails
+mymediatrail.db
+mymediatrail.db-wal
+mymediatrail.db-shm
+thumbnails/
+
+# Heavy binaries & compiled build artifacts
+src-tauri/target/
+src-tauri/binaries/ffprobe-*
+src-tauri/binaries/ffmpeg-*
+*.exe
+*.dmg
+*.deb
+*.msi
+*.AppImage
+*.zip
+*.tar.gz
+*.tgz
+*.dll
+*.so
+*.dylib
+*.bin
+*.out
+

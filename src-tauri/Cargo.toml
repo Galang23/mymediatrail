@@ -1,0 +1,35 @@
+[package]
+name = "mymediatrail"
+version = "1.0.0"
+description = "Local-first desktop application for scanning, browsing, and tracking personal media files"
+authors = ["MyMediaTrail Contributors"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "mymediatrail_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.9.0", features = ["sqlite", "macros", "migrate", "uuid", "chrono", "runtime-tokio"] }
+tokio = { version = "1.52.3", features = ["full"] }
+tauri-plugin-shell = "2"
+chrono = { version = "0.4.44", features = ["serde"] }
+uuid = { version = "1.23.2", features = ["v4", "serde"] }
+blake3 = "1.8.5"
+walkdir = "2.5.0"
+lazy_static = "1.5.0"
+trash = "5.2.6"
+base64 = "0.22.1"
+
