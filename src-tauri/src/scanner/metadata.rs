@@ -145,30 +145,22 @@ pub async fn extract_metadata<P: AsRef<std::path::Path>>(
 
 /// Extracts a single video frame as a JPEG thumbnail using ffmpeg and saves it locally.
 /// Ref User Request: system ffmpeg thumbnail generation.
-pub async fn generate_thumbnail_file(video_path: &std::path::Path, item_id: &str) -> Result<(), String> {
-    // 1. Check if system ffmpeg is installed
-    let use_system = std::process::Command::new("ffmpeg")
-        .arg("-version")
-        .output()
-        .map(|out| out.status.success())
-        .unwrap_or(false);
-
-    if !use_system {
-        return Err("ffmpeg is not installed locally".to_string());
-    }
-
-    // 2. Create the thumbnails directory in the portable directory
+pub async fn generate_thumbnail_file(app_handle: &tauri::AppHandle, video_path: &std::path::Path, item_id: &str) -> Result<(), String> {
+    // 1. Create the thumbnails directory in the portable directory
     let thumb_dir = crate::platform::volume::get_portable_dir().join("thumbnails");
     tokio::fs::create_dir_all(&thumb_dir).await
         .map_err(|e| format!("Failed to create thumbnails dir: {}", e))?;
 
     let output_path = thumb_dir.join(format!("{}.jpg", item_id));
 
-    // 3. Extract a frame at 5 seconds, resized to 320x180 (16:9 standard preview)
+    // 2. Extract a frame at 5 seconds, resized to 320x180 (16:9 standard preview)
     let video_path_str = video_path.to_string_lossy().to_string();
     let output_path_str = output_path.to_string_lossy().to_string();
 
-    let output = Command::new("ffmpeg")
+    let sidecar_command = app_handle
+        .shell()
+        .sidecar("ffmpeg")
+        .map_err(|_| "ffmpeg is not installed on your system. Please install ffmpeg to enable thumbnail generation.".to_string())?
         .args([
             "-y",
             "-ss",
@@ -182,14 +174,22 @@ pub async fn generate_thumbnail_file(video_path: &std::path::Path, item_id: &str
             "-f",
             "image2",
             &output_path_str,
-        ])
-        .output()
-        .await
-        .map_err(|e| format!("ffmpeg execution failed: {}", e))?;
+        ]);
+
+    let result = timeout(Duration::from_secs(30), sidecar_command.output()).await;
+
+    let output = match result {
+        Ok(Ok(out)) => out,
+        Ok(Err(e)) => return Err(format!("ffmpeg sidecar failed: {}", e)),
+        Err(_) => return Err("ffmpeg sidecar timed out after 30 seconds".to_string()),
+    };
 
     if !output.status.success() {
         // Fall back to extracting at 0 seconds if video is shorter than 5 seconds
-        let output_retry = Command::new("ffmpeg")
+        let sidecar_command_retry = app_handle
+            .shell()
+            .sidecar("ffmpeg")
+            .map_err(|_| "ffmpeg is not installed on your system. Please install ffmpeg to enable thumbnail generation.".to_string())?
             .args([
                 "-y",
                 "-ss",
@@ -203,10 +203,14 @@ pub async fn generate_thumbnail_file(video_path: &std::path::Path, item_id: &str
                 "-f",
                 "image2",
                 &output_path_str,
-            ])
-            .output()
-            .await
-            .map_err(|e| format!("ffmpeg retry failed: {}", e))?;
+            ]);
+
+        let result_retry = timeout(Duration::from_secs(30), sidecar_command_retry.output()).await;
+        let output_retry = match result_retry {
+            Ok(Ok(out)) => out,
+            Ok(Err(e)) => return Err(format!("ffmpeg retry sidecar failed: {}", e)),
+            Err(_) => return Err("ffmpeg retry sidecar timed out after 30 seconds".to_string()),
+        };
 
         if !output_retry.status.success() {
             return Err(format!(

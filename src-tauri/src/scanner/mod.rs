@@ -221,7 +221,7 @@ pub async fn scan_root(app: AppHandle, db: SqlitePool, root: LibraryRoot) -> Res
             };
 
             if metadata_status == "ready" {
-                let _ = generate_thumbnail_file(&path, &actual_item_id).await;
+                let _ = generate_thumbnail_file(&app, &path, &actual_item_id).await;
             }
 
             let now = Utc::now().to_rfc3339();

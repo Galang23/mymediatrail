@@ -25,7 +25,8 @@
     "active": true,
     "targets": "all",
     "externalBin": [
-      "binaries/ffprobe"
+      "binaries/ffprobe",
+      "binaries/ffmpeg"
     ],
     "icon": [
       "icons/32x32.png",
