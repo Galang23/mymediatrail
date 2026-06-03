@@ -43,7 +43,7 @@ const URLS = {
     'win32-x64': 'https://unpkg.com/@ffmpeg-installer/win32-x64@4.1.0/ffmpeg.exe',
     'win32-ia32': 'https://unpkg.com/@ffmpeg-installer/win32-ia32@4.1.0/ffmpeg.exe',
     'linux-x64': 'https://unpkg.com/@ffmpeg-installer/linux-x64@4.1.0/ffmpeg',
-    'linux-arm64': 'https://unpkg.com/@ffmpeg-installer/linux-arm64@5.0.0/ffmpeg'
+    'linux-arm64': 'https://unpkg.com/@ffmpeg-installer/linux-arm64@4.1.4/ffmpeg'
   }
 };
 
