@@ -1,11 +1,11 @@
 use serde::{Deserialize, Serialize};
 use tauri_plugin_shell::ShellExt;
-
 use tokio::sync::Semaphore;
 use std::time::Duration;
 use tokio::time::timeout;
-use std::sync::OnceLock;
+use std::sync::LazyLock;
 use tokio::process::Command;
+use crate::error::{AppError, AppResult};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FfprobeOutput {
@@ -33,88 +33,69 @@ pub struct MetadataResult {
     pub codec_text: Option<String>,
 }
 
-// Global semaphore to limit concurrent ffprobe processes
-static FFPROBE_SEMAPHORE: OnceLock<Semaphore> = OnceLock::new();
+static FFPROBE_AVAILABLE: LazyLock<bool> = LazyLock::new(|| {
+    std::process::Command::new("ffprobe")
+        .arg("-version")
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false)
+});
 
-fn get_ffprobe_semaphore() -> &'static Semaphore {
-    FFPROBE_SEMAPHORE.get_or_init(|| Semaphore::new(4))
-}
+static FFPROBE_SEMAPHORE: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(4));
 
 pub async fn extract_metadata<P: AsRef<std::path::Path>>(
     app_handle: &tauri::AppHandle,
     path: P,
-) -> Result<MetadataResult, String> {
+) -> AppResult<MetadataResult> {
     let path_str = path.as_ref().to_string_lossy().to_string();
-    
-    // Acquire semaphore permit
-    let _permit = get_ffprobe_semaphore().acquire().await.map_err(|e| e.to_string())?;
+    let _permit = FFPROBE_SEMAPHORE.acquire().await.map_err(|e| AppError::msg(e.to_string()))?;
 
-    // Check if system ffprobe is installed (Ref User: system ffprobe check)
-    let use_system = std::process::Command::new("ffprobe")
-        .arg("-version")
-        .output()
-        .map(|out| out.status.success())
-        .unwrap_or(false);
-
-    let stdout_bytes = if use_system {
-        // Run standard system-installed ffprobe asynchronously
+    let stdout_bytes = if *FFPROBE_AVAILABLE {
         let out = Command::new("ffprobe")
             .args([
-                "-v",
-                "quiet",
-                "-print_format",
-                "json",
-                "-show_format",
-                "-show_streams",
+                "-v", "quiet", "-print_format", "json",
+                "-show_format", "-show_streams",
                 &path_str,
             ])
             .output()
             .await
-            .map_err(|e| format!("System ffprobe failed to execute: {}", e))?;
+            .map_err(|e| AppError::msg(format!("System ffprobe failed to execute: {}", e)))?;
 
         if !out.status.success() {
-            return Err(format!(
+            return Err(AppError::msg(format!(
                 "System ffprobe returned non-zero status: {}",
                 String::from_utf8_lossy(&out.stderr)
-            ));
+            )));
         }
         out.stdout
     } else {
-        // Fall back to Tauri prebuilt sidecar
         let sidecar_command = app_handle
             .shell()
             .sidecar("ffprobe")
-            .map_err(|_| "ffprobe is not installed on your system. Please install ffmpeg to enable metadata parsing.".to_string())?
+            .map_err(|_| AppError::msg("ffprobe is not installed on your system. Please install ffmpeg to enable metadata parsing."))?
             .args([
-                "-v",
-                "quiet",
-                "-print_format",
-                "json",
-                "-show_format",
-                "-show_streams",
+                "-v", "quiet", "-print_format", "json",
+                "-show_format", "-show_streams",
                 &path_str,
             ]);
 
-        // 30 second timeout as specified in PRD
         let result = timeout(Duration::from_secs(30), sidecar_command.output()).await;
-
         let out = match result {
             Ok(Ok(out)) => out,
-            Ok(Err(e)) => return Err(format!("ffprobe sidecar failed: {}", e)),
-            Err(_) => return Err("ffprobe sidecar timed out after 30 seconds".to_string()),
+            Ok(Err(e)) => return Err(AppError::msg(format!("ffprobe sidecar failed: {}", e))),
+            Err(_) => return Err(AppError::msg("ffprobe sidecar timed out after 30 seconds")),
         };
 
         if !out.status.success() {
-            return Err(format!(
+            return Err(AppError::msg(format!(
                 "ffprobe sidecar returned non-zero status: {}",
                 String::from_utf8_lossy(&out.stderr)
-            ));
+            )));
         }
         out.stdout
     };
 
-    let parsed: FfprobeOutput = serde_json::from_slice(&stdout_bytes)
-        .map_err(|e| format!("Failed to parse ffprobe json: {}", e))?;
+    let parsed: FfprobeOutput = serde_json::from_slice(&stdout_bytes)?;
 
     let mut result = MetadataResult {
         duration_sec: None,
@@ -133,7 +114,6 @@ pub async fn extract_metadata<P: AsRef<std::path::Path>>(
     if let Some(streams) = parsed.streams {
         if let Some(video_stream) = streams.iter().find(|s| s.codec_type.as_deref() == Some("video")) {
             result.codec_text = video_stream.codec_name.clone();
-            
             if let (Some(w), Some(h)) = (video_stream.width, video_stream.height) {
                 result.resolution_text = Some(format!("{}x{}", w, h));
             }
@@ -143,80 +123,52 @@ pub async fn extract_metadata<P: AsRef<std::path::Path>>(
     Ok(result)
 }
 
-/// Extracts a single video frame as a JPEG thumbnail using ffmpeg and saves it locally.
-/// Ref User Request: system ffmpeg thumbnail generation.
-pub async fn generate_thumbnail_file(app_handle: &tauri::AppHandle, video_path: &std::path::Path, item_id: &str) -> Result<(), String> {
-    // 1. Create the thumbnails directory in the portable directory
+pub async fn generate_thumbnail_file(app_handle: &tauri::AppHandle, video_path: &std::path::Path, item_id: &str) -> AppResult<()> {
     let thumb_dir = crate::platform::volume::get_portable_dir().join("thumbnails");
-    tokio::fs::create_dir_all(&thumb_dir).await
-        .map_err(|e| format!("Failed to create thumbnails dir: {}", e))?;
+    tokio::fs::create_dir_all(&thumb_dir).await?;
 
     let output_path = thumb_dir.join(format!("{}.jpg", item_id));
-
-    // 2. Extract a frame at 5 seconds, resized to 320x180 (16:9 standard preview)
     let video_path_str = video_path.to_string_lossy().to_string();
     let output_path_str = output_path.to_string_lossy().to_string();
 
     let sidecar_command = app_handle
         .shell()
         .sidecar("ffmpeg")
-        .map_err(|_| "ffmpeg is not installed on your system. Please install ffmpeg to enable thumbnail generation.".to_string())?
+        .map_err(|_| AppError::msg("ffmpeg is not installed on your system. Please install ffmpeg to enable thumbnail generation."))?
         .args([
-            "-y",
-            "-ss",
-            "00:00:05",
-            "-i",
-            &video_path_str,
-            "-vframes",
-            "1",
-            "-s",
-            "320x180",
-            "-f",
-            "image2",
-            &output_path_str,
+            "-y", "-ss", "00:00:05", "-i", &video_path_str,
+            "-vframes", "1", "-s", "320x180", "-f", "image2", &output_path_str,
         ]);
 
     let result = timeout(Duration::from_secs(30), sidecar_command.output()).await;
-
     let output = match result {
         Ok(Ok(out)) => out,
-        Ok(Err(e)) => return Err(format!("ffmpeg sidecar failed: {}", e)),
-        Err(_) => return Err("ffmpeg sidecar timed out after 30 seconds".to_string()),
+        Ok(Err(e)) => return Err(AppError::msg(format!("ffmpeg sidecar failed: {}", e))),
+        Err(_) => return Err(AppError::msg("ffmpeg sidecar timed out after 30 seconds")),
     };
 
     if !output.status.success() {
-        // Fall back to extracting at 0 seconds if video is shorter than 5 seconds
         let sidecar_command_retry = app_handle
             .shell()
             .sidecar("ffmpeg")
-            .map_err(|_| "ffmpeg is not installed on your system. Please install ffmpeg to enable thumbnail generation.".to_string())?
+            .map_err(|_| AppError::msg("ffmpeg is not installed on your system."))?
             .args([
-                "-y",
-                "-ss",
-                "00:00:00",
-                "-i",
-                &video_path_str,
-                "-vframes",
-                "1",
-                "-s",
-                "320x180",
-                "-f",
-                "image2",
-                &output_path_str,
+                "-y", "-ss", "00:00:00", "-i", &video_path_str,
+                "-vframes", "1", "-s", "320x180", "-f", "image2", &output_path_str,
             ]);
 
         let result_retry = timeout(Duration::from_secs(30), sidecar_command_retry.output()).await;
         let output_retry = match result_retry {
             Ok(Ok(out)) => out,
-            Ok(Err(e)) => return Err(format!("ffmpeg retry sidecar failed: {}", e)),
-            Err(_) => return Err("ffmpeg retry sidecar timed out after 30 seconds".to_string()),
+            Ok(Err(e)) => return Err(AppError::msg(format!("ffmpeg retry sidecar failed: {}", e))),
+            Err(_) => return Err(AppError::msg("ffmpeg retry sidecar timed out after 30 seconds")),
         };
 
         if !output_retry.status.success() {
-            return Err(format!(
+            return Err(AppError::msg(format!(
                 "ffmpeg returned non-zero status: {}",
                 String::from_utf8_lossy(&output_retry.stderr)
-            ));
+            )));
         }
     }
 

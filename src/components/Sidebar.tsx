@@ -8,11 +8,10 @@ interface SidebarProps {
   setCurrentView: (view: string) => void;
   roots: LibraryRoot[];
   setRoots: (roots: LibraryRoot[]) => void;
-  scanMsg: string;
-  isScanning: boolean;
+  scanStatus: { msg: string; scanning: boolean };
 }
 
-export function Sidebar({ currentView, setCurrentView, roots, setRoots, scanMsg, isScanning }: SidebarProps) {
+export function Sidebar({ currentView, setCurrentView, roots, setRoots, scanStatus }: SidebarProps) {
   const [isAddingRoot, setIsAddingRoot] = useState(false);
   const [newRootLabel, setNewRootLabel] = useState("");
   const [newRootPath, setNewRootPath] = useState("");
@@ -132,7 +131,7 @@ export function Sidebar({ currentView, setCurrentView, roots, setRoots, scanMsg,
                       <AlertTriangle size={14} color="var(--warning-color)" /> Rebind
                     </button>
                   ) : (
-                    <button onClick={() => triggerScan(root.id)} className="scan-btn" disabled={isScanning}>
+                    <button onClick={() => triggerScan(root.id)} className="scan-btn" disabled={scanStatus.scanning}>
                       Scan
                     </button>
                   )}
@@ -191,10 +190,10 @@ export function Sidebar({ currentView, setCurrentView, roots, setRoots, scanMsg,
         )}
       </div>
 
-      {isScanning && (
+      {scanStatus.scanning && (
         <div className="scan-progress animate-fade-in">
           <div className="scan-spinner"></div>
-          <div className="scan-text">{scanMsg}</div>
+          <div className="scan-text">{scanStatus.msg}</div>
         </div>
       )}
     </aside>

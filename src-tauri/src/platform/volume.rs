@@ -2,10 +2,10 @@ use std::process::Command;
 use std::path::{Path, PathBuf};
 use sqlx::SqlitePool;
 use chrono::Utc;
+use crate::error::{AppError, AppResult, bail};
 use crate::models::LibraryRoot;
 
 /// Returns the portable directory. If inside `src-tauri` (development), climbs up one level to prevent file-watching infinite loops.
-/// Ref User Request: Dev file-watching loop break.
 pub fn get_portable_dir() -> PathBuf {
     let mut pwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     if pwd.ends_with("src-tauri") {
@@ -16,11 +16,7 @@ pub fn get_portable_dir() -> PathBuf {
     pwd
 }
 
-/// Retrieves the UUID of the volume containing the specified path on Linux.
-///
-/// This uses `findmnt` (util-linux) to find the UUID of the mount point.
-/// e.g. `findmnt -n -o UUID -T <path>`
-pub fn get_volume_uuid_linux<P: AsRef<Path>>(path: P) -> Result<String, String> {
+fn get_volume_uuid_linux<P: AsRef<Path>>(path: P) -> AppResult<String> {
     let path = path.as_ref();
     let output = Command::new("findmnt")
         .arg("-n")
@@ -29,40 +25,32 @@ pub fn get_volume_uuid_linux<P: AsRef<Path>>(path: P) -> Result<String, String> 
         .arg("-T")
         .arg(path)
         .output()
-        .map_err(|e| format!("Failed to execute findmnt: {}", e))?;
+        .map_err(|e| AppError::msg(format!("Failed to execute findmnt: {}", e)))?;
 
     if !output.status.success() {
-        return Err(format!(
-            "findmnt failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
+        bail!("findmnt failed: {}", String::from_utf8_lossy(&output.stderr));
     }
 
     let uuid = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if uuid.is_empty() {
-        return Err("findmnt returned empty UUID".to_string());
+        bail!("findmnt returned empty UUID");
     }
 
     Ok(uuid)
 }
 
-/// Retrieves the UUID of the volume containing the specified path.
-/// Ref Issue #1 - Cross-platform wrapper.
-pub fn get_volume_uuid<P: AsRef<Path>>(path: P) -> Result<String, String> {
+pub fn get_volume_uuid<P: AsRef<Path>>(path: P) -> AppResult<String> {
     #[cfg(target_os = "linux")]
     {
         get_volume_uuid_linux(path)
     }
     #[cfg(not(target_os = "linux"))]
     {
-        Err("Unsupported operating system for volume UUID detection".to_string())
+        bail!("Unsupported operating system for volume UUID detection")
     }
 }
 
-/// Retrieves the mount point containing the specified path on Linux.
-/// e.g. `findmnt -n -o TARGET -T <path>`
-/// Ref Issue #1 - Find mount point.
-pub fn get_mount_point_linux<P: AsRef<Path>>(path: P) -> Result<String, String> {
+fn get_mount_point_linux<P: AsRef<Path>>(path: P) -> AppResult<String> {
     let path = path.as_ref();
     let output = Command::new("findmnt")
         .arg("-n")
@@ -71,33 +59,27 @@ pub fn get_mount_point_linux<P: AsRef<Path>>(path: P) -> Result<String, String> 
         .arg("-T")
         .arg(path)
         .output()
-        .map_err(|e| format!("Failed to execute findmnt: {}", e))?;
+        .map_err(|e| AppError::msg(format!("Failed to execute findmnt: {}", e)))?;
 
     if !output.status.success() {
-        return Err(format!(
-            "findmnt failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
+        bail!("findmnt failed: {}", String::from_utf8_lossy(&output.stderr));
     }
 
     let mount_point = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if mount_point.is_empty() {
-        return Err("findmnt returned empty mount point".to_string());
+        bail!("findmnt returned empty mount point");
     }
 
     Ok(mount_point)
 }
 
-/// Retrieves the mount point containing the specified path.
-/// Ref Issue #1 - Cross-platform wrapper.
-pub fn get_mount_point<P: AsRef<Path>>(path: P) -> Result<String, String> {
+pub fn get_mount_point<P: AsRef<Path>>(path: P) -> AppResult<String> {
     #[cfg(target_os = "linux")]
     {
         get_mount_point_linux(path)
     }
     #[cfg(not(target_os = "linux"))]
     {
-        // Simple fallback
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
             Ok(parent.to_string_lossy().to_string())
@@ -107,22 +89,17 @@ pub fn get_mount_point<P: AsRef<Path>>(path: P) -> Result<String, String> {
     }
 }
 
-/// Lists all currently mounted volumes and their UUIDs on Linux.
-/// Ref Issue #1 - Mount discovery.
-pub fn list_mounted_volumes_linux() -> Result<Vec<(String, String)>, String> {
+fn list_mounted_volumes_linux() -> AppResult<Vec<(String, String)>> {
     let output = Command::new("findmnt")
         .arg("-r")
         .arg("-n")
         .arg("-o")
         .arg("TARGET,UUID")
         .output()
-        .map_err(|e| format!("Failed to execute findmnt: {}", e))?;
+        .map_err(|e| AppError::msg(format!("Failed to execute findmnt: {}", e)))?;
 
     if !output.status.success() {
-        return Err(format!(
-            "findmnt failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
+        bail!("findmnt failed: {}", String::from_utf8_lossy(&output.stderr));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -142,9 +119,7 @@ pub fn list_mounted_volumes_linux() -> Result<Vec<(String, String)>, String> {
     Ok(volumes)
 }
 
-/// Lists all currently mounted volumes and their UUIDs.
-/// Ref Issue #1 - Cross-platform wrapper.
-pub fn list_mounted_volumes() -> Result<Vec<(String, String)>, String> {
+pub fn list_mounted_volumes() -> AppResult<Vec<(String, String)>> {
     #[cfg(target_os = "linux")]
     {
         list_mounted_volumes_linux()
@@ -156,18 +131,15 @@ pub fn list_mounted_volumes() -> Result<Vec<(String, String)>, String> {
 }
 
 /// Dynamically resolves and auto-heals a library root path if mounted at a new location.
-/// Ref Issue #1 - Dynamic Auto-Healing.
-pub async fn resolve_and_heal_root(db: &SqlitePool, root_id: &str) -> Result<PathBuf, String> {
+pub async fn resolve_and_heal_root(db: &SqlitePool, root_id: &str) -> AppResult<PathBuf> {
     let root: LibraryRoot = sqlx::query_as::<_, LibraryRoot>("SELECT * FROM library_roots WHERE id = ?")
         .bind(root_id)
         .fetch_optional(db)
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "Library root not found".to_string())?;
+        .await?
+        .ok_or_else(|| AppError::msg("Library root not found"))?;
 
     let selected_path = PathBuf::from(&root.selected_path);
 
-    // 1. If path exists, check status and return
     if selected_path.exists() {
         if root.root_status == "missing" || root.root_status == "new" {
             let now = Utc::now().to_rfc3339();
@@ -175,28 +147,25 @@ pub async fn resolve_and_heal_root(db: &SqlitePool, root_id: &str) -> Result<Pat
                 .bind(&now)
                 .bind(root_id)
                 .execute(db)
-                .await
-                .map_err(|e| e.to_string())?;
+                .await?;
         }
         return Ok(selected_path);
     }
 
-    // 2. If path doesn't exist, attempt to auto-heal using volume_uuid
     if let Some(ref uuid) = root.volume_uuid {
         if let Ok(mounted_volumes) = list_mounted_volumes() {
             if let Some((new_mount_path, _)) = mounted_volumes.iter().find(|(_, u)| u == uuid) {
                 let last_mount = root.last_known_mount_path.as_deref().unwrap_or("");
                 let old_selected = Path::new(&root.selected_path);
                 let old_mount = Path::new(last_mount);
-                
-                // Get the relative subfolder from the old mount point
+
                 let relative_subfolder = old_selected.strip_prefix(old_mount).unwrap_or(old_selected);
                 let new_selected_path = PathBuf::from(new_mount_path).join(relative_subfolder);
-                
+
                 if new_selected_path.exists() {
                     let new_path_str = new_selected_path.to_string_lossy().to_string();
                     let now = Utc::now().to_rfc3339();
-                    
+
                     sqlx::query(
                         "UPDATE library_roots SET selected_path = ?, normalized_selected_path = ?, last_known_mount_path = ?, root_status = 'active', updated_at = ? WHERE id = ?"
                     )
@@ -206,27 +175,24 @@ pub async fn resolve_and_heal_root(db: &SqlitePool, root_id: &str) -> Result<Pat
                     .bind(&now)
                     .bind(root_id)
                     .execute(db)
-                    .await
-                    .map_err(|e| e.to_string())?;
-                    
+                    .await?;
+
                     return Ok(new_selected_path);
                 }
             }
         }
     }
 
-    // 3. Mark root as missing if it wasn't already
     if root.root_status != "missing" {
         let now = Utc::now().to_rfc3339();
         sqlx::query("UPDATE library_roots SET root_status = 'missing', updated_at = ? WHERE id = ?")
             .bind(&now)
             .bind(root_id)
             .execute(db)
-            .await
-            .map_err(|e| e.to_string())?;
+            .await?;
     }
 
-    Err(format!("Library root '{}' is offline (path not found)", root.label))
+    bail!("Library root '{}' is offline (path not found)", root.label)
 }
 
 #[cfg(test)]
@@ -241,10 +207,6 @@ mod tests {
         let uuid = get_volume_uuid(&current_path);
         let mount = get_mount_point(&current_path);
         
-        println!("Test workspace volume UUID: {:?}", uuid);
-        println!("Test workspace mount point: {:?}", mount);
-        
-        // Verify mount point resolution functions properly
         assert!(mount.is_ok());
         let mount_path = mount.unwrap();
         assert!(!mount_path.is_empty());
@@ -296,13 +258,11 @@ mod tests {
         .await
         .unwrap();
 
-        // 1. Resolve should succeed because the directory exists on the system
         let res = resolve_and_heal_root(&pool, "test-root").await;
         assert!(res.is_ok());
         let resolved = res.unwrap();
         assert_eq!(resolved, PathBuf::from(&current_dir));
 
-        // 2. Status should transition from 'new' to 'active'
         let status: String = sqlx::query_scalar("SELECT root_status FROM library_roots WHERE id = 'test-root'")
             .fetch_one(&pool)
             .await
@@ -356,11 +316,9 @@ mod tests {
         .await
         .unwrap();
 
-        // 1. Resolve should fail and return an error because the directory does not exist and there is no volume UUID to auto-heal
         let res = resolve_and_heal_root(&pool, "test-root-missing").await;
         assert!(res.is_err());
 
-        // 2. Status should transition to 'missing'
         let status: String = sqlx::query_scalar("SELECT root_status FROM library_roots WHERE id = 'test-root-missing'")
             .fetch_one(&pool)
             .await

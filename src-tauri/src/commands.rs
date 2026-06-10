@@ -1,20 +1,20 @@
 use crate::models::{LibraryRoot, MediaItem};
 use crate::AppState;
+use crate::error::{AppError, AppResult, bail};
 use tauri::State;
 
 #[tauri::command]
 pub async fn run_ffprobe(app: tauri::AppHandle) -> Result<String, String> {
-    // 1. Check if standard system ffprobe is installed (Ref User: system ffprobe detection)
-    let output = std::process::Command::new("ffprobe")
+    let output = tokio::process::Command::new("ffprobe")
         .arg("-version")
-        .output();
-    
+        .output()
+        .await;
+
     match output {
         Ok(out) if out.status.success() => {
             Ok(format!("System ffprobe is installed locally:\n{}", String::from_utf8_lossy(&out.stdout)))
         }
         _ => {
-            // 2. Try sidecar fallback
             use tauri_plugin_shell::ShellExt;
             let sidecar_command = app.shell().sidecar("ffprobe");
             match sidecar_command {
@@ -32,7 +32,7 @@ pub async fn run_ffprobe(app: tauri::AppHandle) -> Result<String, String> {
 
 #[tauri::command]
 pub fn test_get_volume_uuid(path: String) -> Result<String, String> {
-    crate::platform::volume::get_volume_uuid(&path)
+    crate::platform::volume::get_volume_uuid(&path).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -44,17 +44,29 @@ pub async fn add_root(
 ) -> Result<LibraryRoot, String> {
     use uuid::Uuid;
     use chrono::Utc;
-    
+
+    let path_trimmed = path.trim();
+    if path_trimmed.is_empty() {
+        return Err("Path cannot be empty".to_string());
+    }
+    let pb = std::path::Path::new(path_trimmed);
+    if !pb.exists() {
+        return Err(format!("Path does not exist: {}", path_trimmed));
+    }
+    if !pb.is_dir() {
+        return Err(format!("Path is not a directory: {}", path_trimmed));
+    }
+
     let now = Utc::now().to_rfc3339();
-    let mount_point = crate::platform::volume::get_mount_point(&path).unwrap_or_else(|_| path.clone());
-    
+    let mount_point = crate::platform::volume::get_mount_point(path_trimmed).unwrap_or_else(|_| path_trimmed.to_string());
+
     let root = LibraryRoot {
         id: Uuid::new_v4().to_string(),
         label,
-        selected_path: path.clone(),
-        normalized_selected_path: path.replace('\\', "/"),
+        selected_path: path_trimmed.to_string(),
+        normalized_selected_path: path_trimmed.replace('\\', "/"),
         os_type: std::env::consts::OS.to_string(),
-        volume_uuid: crate::platform::volume::get_volume_uuid(&path).ok(),
+        volume_uuid: crate::platform::volume::get_volume_uuid(path_trimmed).ok(),
         volume_serial: None,
         volume_label: None,
         last_known_mount_path: Some(mount_point),
@@ -63,11 +75,10 @@ pub async fn add_root(
         created_at: now.clone(),
         updated_at: now,
     };
-    
+
     let repo = crate::repository::LibraryRootRepository::new(&state.db);
     repo.insert(&root).await.map_err(|e| e.to_string())?;
-    
-    // Automatically trigger recursive scan in the background on add (Ref User: Auto-Scan on Add)
+
     let db = state.db.clone();
     let root_clone = root.clone();
     tokio::spawn(async move {
@@ -96,9 +107,7 @@ pub async fn trigger_scan(
         .fetch_one(&state.db)
         .await
         .map_err(|e| format!("Root not found: {}", e))?;
-    
-    // Spawn the scan in a background thread to prevent blocking the IPC channel!
-    // Ref Issue #3 - Async Scanning.
+
     let db = state.db.clone();
     tokio::spawn(async move {
         if let Err(e) = crate::scanner::scan_root(app, db, root).await {
@@ -113,12 +122,21 @@ pub async fn trigger_scan(
 pub async fn get_media_items(
     state: State<'_, AppState>,
     root_id: String,
+    limit: Option<i64>,
+    offset: Option<i64>,
 ) -> Result<Vec<MediaItem>, String> {
-    sqlx::query_as::<_, MediaItem>("SELECT * FROM media_items WHERE root_id = ?")
-        .bind(&root_id)
-        .fetch_all(&state.db)
-        .await
-        .map_err(|e| e.to_string())
+    let l = limit.unwrap_or(100).clamp(1, 1000);
+    let o = offset.unwrap_or(0).max(0);
+
+    sqlx::query_as::<_, MediaItem>(
+        "SELECT * FROM media_items WHERE root_id = ? ORDER BY relative_path LIMIT ? OFFSET ?"
+    )
+    .bind(&root_id)
+    .bind(l)
+    .bind(o)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[derive(serde::Serialize)]
@@ -129,7 +147,6 @@ pub struct DuplicateGroup {
 
 #[tauri::command]
 pub async fn get_duplicate_groups(state: State<'_, AppState>) -> Result<Vec<DuplicateGroup>, String> {
-    // Find all hashes that appear more than once
     let duplicate_hashes: Vec<String> = sqlx::query_scalar(
         "SELECT fingerprint_hash FROM media_fingerprints GROUP BY fingerprint_hash HAVING COUNT(media_item_id) > 1"
     )
@@ -140,7 +157,6 @@ pub async fn get_duplicate_groups(state: State<'_, AppState>) -> Result<Vec<Dupl
     let mut result = Vec::new();
 
     for hash in duplicate_hashes {
-        // Find all media items for this hash
         let items: Vec<MediaItem> = sqlx::query_as::<_, MediaItem>(
             "SELECT m.* FROM media_items m JOIN media_fingerprints f ON m.id = f.media_item_id WHERE f.fingerprint_hash = ?"
         )
@@ -161,7 +177,9 @@ pub async fn merge_and_clean(
     preferred_id: String,
     discarded_ids: Vec<String>,
 ) -> Result<(), String> {
-    crate::media::merge::merge_and_clean(&state.db, &preferred_id, discarded_ids).await
+    crate::media::merge::merge_and_clean(&state.db, &preferred_id, discarded_ids)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -171,12 +189,10 @@ pub async fn rebind_root(
     new_path: String,
 ) -> Result<(), String> {
     use chrono::Utc;
-    
-    // Check if new path exists and verify UUID if possible
+
     let new_uuid = crate::platform::volume::get_volume_uuid(&new_path).ok();
     let new_mount = crate::platform::volume::get_mount_point(&new_path).unwrap_or_else(|_| new_path.clone());
-    
-    // Update the database
+
     let now = Utc::now().to_rfc3339();
     sqlx::query(
         "UPDATE library_roots SET selected_path = ?, normalized_selected_path = ?, volume_uuid = COALESCE(?, volume_uuid), last_known_mount_path = ?, root_status = 'active', updated_at = ? WHERE id = ?"
@@ -204,7 +220,6 @@ pub async fn play_media(
     use chrono::Utc;
     use uuid::Uuid;
 
-    // Fetch media item first to check paths
     let item: MediaItem = sqlx::query_as::<_, MediaItem>("SELECT * FROM media_items WHERE id = ?")
         .bind(&media_item_id)
         .fetch_optional(&state.db)
@@ -212,17 +227,12 @@ pub async fn play_media(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "Media item not found".to_string())?;
 
-    // 1. Resolve and auto-heal the path first
-    // Ref Issue #1 & #5
     let resolved_root_path = crate::platform::volume::resolve_and_heal_root(&state.db, &item.root_id).await
         .map_err(|e| format!("Failed to resolve library path: {}", e))?;
 
     let abs_path = resolved_root_path.join(&item.relative_path);
 
-    // 2. Pre-flight file existence check
-    // Ref Issue #5
     if !abs_path.exists() {
-        // Mark as missing in the database
         sqlx::query("UPDATE media_items SET metadata_status = 'missing', updated_at = ? WHERE id = ?")
             .bind(Utc::now().to_rfc3339())
             .bind(&media_item_id)
@@ -232,16 +242,13 @@ pub async fn play_media(
         return Err("File not found - has it been moved or is the drive disconnected?".to_string());
     }
 
-    // Open file using default OS player
     app_handle.opener().open_path(abs_path.to_string_lossy().to_string(), None::<&str>)
         .map_err(|e| format!("Failed to open file: {}", e))?;
 
     let now = Utc::now().to_rfc3339();
 
-    // Log play event and update status inside a transactional lock
     let mut tx = state.db.begin().await.map_err(|e| e.to_string())?;
 
-    // Log play event
     let event_id = Uuid::new_v4().to_string();
     sqlx::query(
         "INSERT INTO play_events (id, media_item_id, opened_at, source_action) VALUES (?, ?, ?, 'manual_play')"
@@ -253,7 +260,6 @@ pub async fn play_media(
     .await
     .map_err(|e| e.to_string())?;
 
-    // Update media item watch status
     let new_status = if item.watch_status == "unwatched" { "in_progress" } else { &item.watch_status };
 
     sqlx::query(
@@ -267,7 +273,6 @@ pub async fn play_media(
     .await
     .map_err(|e| e.to_string())?;
 
-    // Propagate to group if changed
     if item.watch_status == "unwatched" {
         sqlx::query("UPDATE media_groups SET merged_watch_status = 'in_progress', updated_at = ? WHERE id = ?")
             .bind(&now)
@@ -307,7 +312,6 @@ pub async fn update_watch_status(
         .await
         .map_err(|e| e.to_string())?;
 
-    // Propagate it upwards
     sqlx::query("UPDATE media_groups SET merged_watch_status = ?, updated_at = ? WHERE id = ?")
         .bind(&status)
         .bind(&now)
@@ -323,8 +327,6 @@ pub async fn update_watch_status(
 
 #[tauri::command]
 pub async fn get_cleanup_suggestions(state: State<'_, AppState>) -> Result<Vec<MediaItem>, String> {
-    // Exclude missing items from cleanup recommendations
-    // Ref Issue #5
     sqlx::query_as::<_, MediaItem>(
         "SELECT * FROM media_items WHERE watch_status = 'watched' AND metadata_status != 'missing' ORDER BY size_bytes DESC"
     )
@@ -341,7 +343,6 @@ pub async fn delete_media_items(
 ) -> Result<(), String> {
     if media_item_ids.is_empty() { return Ok(()); }
 
-    // Cache resolved root paths to avoid redundant mount system calls
     let mut resolved_roots: std::collections::HashMap<String, std::path::PathBuf> = std::collections::HashMap::new();
 
     let mut tx = state.db.begin().await.map_err(|e| e.to_string())?;
@@ -370,7 +371,6 @@ pub async fn delete_media_items(
         let abs_path = if let Some(ref rp) = root_path {
             rp.join(&item.relative_path)
         } else {
-            // fallback to database selected path
             let root: LibraryRoot = sqlx::query_as::<_, LibraryRoot>("SELECT * FROM library_roots WHERE id = ?")
                 .bind(&item.root_id)
                 .fetch_one(&mut *tx)
@@ -387,7 +387,6 @@ pub async fn delete_media_items(
             }
         }
 
-        // Delete associated records
         sqlx::query("DELETE FROM media_items WHERE id = ?")
             .bind(&id)
             .execute(&mut *tx)

@@ -4,6 +4,7 @@ pub mod platform;
 mod commands;
 pub mod scanner;
 pub mod media;
+pub mod error;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
